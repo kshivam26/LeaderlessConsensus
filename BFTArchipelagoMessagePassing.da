@@ -1,0 +1,150 @@
+import sys
+import copy
+
+class P(process):
+    def setup(pId, processes):
+        self.n = len(processes)                        ## Number of processes spawned               
+        self.f = int((self.n - 1)/2)                   ## n = 2f + 1
+        self.numRounds = 10                            ## max number of rounds for decision
+        self.i = 0                                     # i, the current rank, initially 0  ## round number
+        self.R = set()                                 # R, a set of tuples, initially empty ## used in R-Step  ## pairs of (round, proposed_v)
+        self.A = [ set() for _ in range(numRounds) ]   # A[0,1,...] and B[0,1,...], 
+        self.B = [ set() for _ in range(numRounds) ]   # two sequence of sets all initially empty
+        self.BA = []                                   # C a sequence of broadcasts ID with the number of answers they have received # Here BA, for simplicity
+
+    def propose(v:int):
+        while True:                                    # while true do
+            i, v1 = RStep(v)                           #    <i,v'> <- R-Step(v)  ## max of pairs in R from majority, writing to i is dead
+            output("==== RStep done i,v: ", i, v1)
+            flag, v2 = AStep(i, v1)                    #    <flag,v''> <- A-Step(v')  ## flag iff True iff majority has same v2, ow v2 is max of val
+            output("==== AStep done flag, v2: ", (flag, v2))
+            control, val = BStep(flag, i, v2)          #    <control,val> <- B-Step(flag,v'')  ## control is committ iff majority has same Ture, val
+            output("==== BStep done control, val: ", (control, val))
+            if control == "commit" :                   #    if control = commit then
+                return val                             #        return val
+            else:                                      #    else
+                i = i+1                                #        i <- i+1
+                v = val                                #        v <- val
+                output("iteration incremented by 1, i: ", i)
+
+    def RStep(v):                                                   # procedure R-Step(v)
+        C = compile_certificate('R', i)                             # compile certificate C (empty at rank 0)
+        send(('R', i, v, C), to= processes)                         # broadcast(R,i,v,C)
+        if await(len(setof((p), received(('Rresp', _i, R, sig, b), from_=p), valid(R, i, sig))) >= 2*f+1): # wait until (receive valid(Rresp,i,R,C) from 2f+1 processes  ## C was not sent ##b?
+            R = R | setof(x, received(('Rresp', _i, R, sig, b)), x in R, valid(R, i, sig))                 # R <- R U {union of all valid Rs received in previous line}
+            i1, v1 = max(R)                                         # <i',v'> <- max(R)
+            R = {max(R)}                                            # R <- max(R)  ## change of type to an element of R?
+            return i1, v1                                           # return <i',v'>
+        elif timeout(20):
+            output ('request timed out in RStep')
+    
+    def receive(msg=('R', j, v, C), from_= p):                      # upon delivering (R, j, v, C) from p:
+        if reliability_check('R', j, v, C):                         # if reliability check(R,j,v,C) then
+            R = {max({(j,v)} | R)}                                  #   R <- max((j,v), R)
+            b = 0                                                   #   b <- bcast responsible for R[j]'s value ## is this a broadcast ID? 
+            sig = sign('Rresp', j, v, C)                               ## sig needs definition ?
+            send(('Rresp', j, R, sig, b), to= processes)            #   send(Rresp,j,R,sig,b) to all
+        else: pass                                                  # else ignore message from p
+
+    def AStep(i, v:int):                                            # procedure A-Step(i,v)
+        C = compile_certificate('A', i)                             # compile certificate C
+        send(('A', i, v, C), to= processes)                         # broadcast(A,i,v,C)
+        if await(len(setof((p), received(('Aresp', _i, Ai, sig, b), from_ = p), valid(A, i, sig))) >= 2*f+1): # wait until receive valid (Aresp,i,A[i]) from 2f+1 processes
+            S = setof(x, received(('Aresp', _i, Ai, sig, b)), x in Ai)      # S <- union of all A[i]s received ## isn't this a collection of all valid ones
+            if len(S) == 1 and some(val in S):                      # if (S contains at least 2f+1 A-answers containing only val) then ##Suppose there are more than 2f+1 answers, and some of them do not contain val, but are still valid if 2f+1 of them contain val
+                return (True, val)                                  #   return <true,val>
+            else: return (False, max(S))                            # else return <false,max(S)>
+        elif timeout(20):               
+            output ('request timed out in AStep')
+
+    def receive(msg=('A', j, v, C), from_=p):                       # upon delivering (A,j,v,C) from p:
+        if reliability_check('A', j, v, C):                         # if reliability check(A,j,v,C) then
+            if v not in A[j] and len(A[j]) < 2:                     #   if v not belong to A[j] and |A[j]| < 2 then
+                A[j].add(v)                                         #       add v to A[j] 
+            elif v > max(A[j]):                                     #   else if v > max(A[j]) then
+                A[j].remove(min(A[j]))                              #       min(A[j]) <- v  ## bad way to express
+                A[j].add(v)
+            b = 0                                                   #   b <- bcast responsible for A[j]'s value   ## What is meant by this??
+            sig = sign('Aresp', j, v, C)                              ## sig needs definition ?
+            send(('Aresp', j, A[j], sig, b), to=processes)          #   send (Aresp,j,A[j],sig,b) to all  ## what about received signature
+        else: pass                                                  # else ignore message from p
+    
+    def BStep(f, i, v):                                             # procedure B-Step(f,i,v):
+        C = compile_certificate('B', i)                             # compile certificate C
+        send(('B', i, f, v, C), to= processes)                      # broadcast(B,i,f,v, C)
+        if await(len(setof((p), received(('Bresp', _i, Bi, sig, b), from_= p), valid(B, i, sig))) >= 2*f+1):  # wait until receive valid (Bresp,i,B[i]) from 2f+1 proc  ## b?
+            S = listof(x, received(('Bresp', _i, Bi, sig, b)), x in Bi)     # S <- array with all B[i]s received
+            if some((True, val) in S, has=S.count((True, val)) >= 2*f+1):   # if |{(true, val) belongs to S}| >= 2f+1 then      
+                return ('commit', val)                              #   return <commit,val>
+            elif some((True, val) in S):                            # else |{(true, val) belongs to S}|>= 1 then 
+                return ('adopt', val)                               #   return <adopt,val>
+            else:                                                   # else
+                return ('adopt', max(S))                            #   return <adopt,max(S)>
+        elif timeout(20):
+            output ('request timed out in BStep')
+
+    def receive(msg=('B', j, f, v, C), from_= p):                   # upon delivery (B,j,f,v,C) from p:
+        if reliability_check('B', j, v, C):                         # if reliability check (B,j,v,C) then
+            m = max({x[1] for x in B[j]} or {-1})                   #   m <- max(B[j][0].v, B[j][1].v)  ## set B has 0th and 1st elements ?  #Bj empty? initially empty
+            if len(B[j]) < 2: B[j].add((f,v))                       #   if |B[j]| < 2 then add (f,v) to B[j]    ## why are two B[j]s being considered ?
+            elif f and (f,v) not in B[j] or not f and v > m:        #   else if (f intersection (f,v) does not belong to B[j] union not f intersection v > m) then
+                B[j].remove(min(B[j]))                              #       B[j][0] <- (f,v)  ## does it remove the smallest element ?
+                B[j].add((f,v))     
+                b = 0                                               #       b <- bcast resp. for B[j]'s (f,vals)  ##?
+                sig = sign('Bresp', j, v, C)                          ## sig need definition
+                send(('Bresp', j, B[j], sig, b), to= processes)     #       send(Bresp,j,B[j],sig,b)    ## what about received signature ?? ## send to who ?
+            b = 0                                                   #   b <- resp. for B[j]'s (f,vals)  ## what is meant by this ?
+            sig = sign('Bresp', j, v, C)                              ## sign again ? ## is sig used to compile certificate? check appendix H A.19
+            send(('Bresp', j, B[j], sig, b), to= processes)         #   send(Bresp,j,B[j],sig,b) to all  ## send a second time in case of eles-branch above?
+        else: pass                                                  # else ignore message from p
+
+    def reliability_check(X,i,v,C):             # Reliability check broadcast(X,i,v):
+    #   if len(ba for ba in BA) > f             # if |{bcast-answers in BA}| > f then ## BA is currently empty, todo#
+    #       return True                         #   return true
+        # output('entered reliability check with X ', X, ' i ', i, ' v ', v, ' C ', C)
+        if (X == 'R' and i == 0): return True       ## Initial condition to be checked
+        if not (len(C) >= 2*f+1): return False  # check that |C|>= 2f+1 messages  ## but compile cert always list 2f+1 ?
+        if not check(C): return False           # check signatures of those messages  ## What is expected to be checked? Does this mean, there is a sig/hashed answer returned?
+    #   if not (len(BA) > f): return False      # check if |{bcast-answers}| > f  ## diff from first line? ## no data in BA yet
+        if X == "R":                                                                        # if X = R then
+            if not check((i,v, setof((i,Bi,sig,b), received(('Bresp', _i, Bi, sig, b))))):  #   check (i,v) is correct according to   ## def check?
+                return False                                                                #   signed B-answers received and step B
+        elif X == 'A':                                                                      # else if X = A then
+            if not check((i,v, setof((i,R,sig,b), received(('Rresp', _i, R, sig, b))))):    #   check (i,v) is correct according to   ## how check?
+                return False                                                                #   signed R-answers received and step R
+        elif X == 'B':                                                                      # else if X = B then
+            if not check((i,v, setof((i,Ai,sig,b), received(('Aresp', _i, Ai, sig, b))))):  #   check (i,f,v) is correct according to 
+                return False                                                                #   signed A-answers received and step A    
+        return True                             # return true if all checks pass,
+                                                # false otherwise
+
+    def sign(tag, i, v, C): return 'signed'     
+    def valid(tag, i, sig): return True         # To reliably check responses (check if a response is valid), 
+                                                # check if, for the broadcast(s) originating its value we have
+                                                # received 2f+1 responses to that broadcast
+    def check(x): return True  ## to do
+    
+    def compile_certificate(tag, i):    # To compile broadcast certificate, 
+                                        # list all 2f + 1 answers to the previous step 
+                                        # broadcast received during the previous step.
+      if tag == 'R':
+        if i == 0: return [];           ##output('rank 0 return empty list')
+        return listof((i-1, Bi, sig, b), received(('Bresp', i-1, Bi, sig, b), from_= p))
+      if tag == 'A':
+        return listof((i, R, sig, b), received(('Rresp', _i, R, sig, b)))
+      if tag == 'B':
+        return listof((i, Ai, sig, b), received(('Aresp', _i, Ai, sig, b)))
+
+    def run():
+        if pId == 1:
+            val = propose(2)
+        else:
+            val = propose(1)
+        output("Value is", val)
+
+def main():
+    n = int(sys.argv[1]) if len(sys.argv) > 1 else 7
+    ps = new(P, num= n)
+    for i, p in enumerate(ps):
+        setup(p, (i, ps))
+    start(ps)

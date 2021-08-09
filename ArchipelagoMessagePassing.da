@@ -1,0 +1,103 @@
+import sys
+import random
+
+class P(process):
+    def setup(pId, processes):
+        self.n = len(processes)                                     ## Number of processes spawned
+        self.f = int((self.n - 1)/2)                                ## n = 2f + 1
+        self.numRounds = 10                                         ## max number of rounds for decision
+        self.i = 0                                     # Current adopt-commit-max object, initially 0  ## round number
+        self.R = set()                                 # Set of tuples, initially empty, used in R-Step  ## pairs of (round, proposed_v)
+        self.A = [ set() for _ in range(numRounds) ]   # A[0,1,...], a sequence of sets all initially empty  ##
+        self.B = [ set() for _ in range(numRounds) ]   # B[0,1,...], a sequence of sets all initially empty
+
+    def propose(v:int):
+        while 1:                              # while true do
+            i, v1 = RStep(v)                  # <i,v'> <- R-Step(v)  ## max of pairs in R from majority, writing to i is dead
+            output("==== RStep done i,v: ", i, v1)
+            flag, v2 = AStep(v1)              # <flag,v''> <- A-Step(v')  ## flag iff True iff majority has same v2, ow v2 is max of val
+            output("==== AStep done flag, v2: ", (flag, v2))
+            control, val = BStep(flag, v2)    # <control,val> <- B-Step(flag,v'')  ## control is committ iff majority has same Ture, val
+            output("==== BStep done control, val: ", (control, val))
+            if control == "commit" :          # if control = commit then
+                return val                    #   return val
+            else:                             # else
+                i = i+1                       #   i <- i+1
+                output("iteration incremented by 1, i: ", i)
+
+
+    def RStep(v:int):                                               # procedure R-Step(v)
+        send(('R', i, v), to= processes)                            # broadcast(R,i,v)
+        if await(len(setof(p, received(('R-response', _i, R1), from_ = p))) >= f+1): # wait until receive (R-response,i,R) from f+1 proc
+            self.R = self.R | setof(x, received(('R-response', _i, R1)), x in R1)  # R <- R U {union of all Rs received in previous line}
+            i1, v1 = max(R)                                         # <i',v'> <- max(R)
+            return i1, v1                                           # return <i',v'>
+        elif timeout(20):
+            output ('request timed out in RStep')
+
+    def AStep(v:int):                                               # procedure A-Step(v)
+        send(('A', i, v), to= processes)                            # broadcast(A,i,v)
+        if await(len(setof(p, received(('A-response', _i, Ai), from_ = p))) >= (f+1)):# wait until receive (A-response,i,A[i]) from f+1 proc
+            S = setof(x, received(('A-response', _i, Ai)), x in Ai) # S <- union of all A[i]s received
+            if len(S) == 1 and some(val in S):                      # if S contains only one value val then
+                return (True, val)                                  #   return <true,val>
+            return (False, max(S))                                  # else return <false,max(S)>
+        elif timeout(20):
+            output ('request timed out in AStep')
+
+    def BStep(flag:bool, v2):                                       # procedure B-Step(flag,v)
+        send(('B', i, flag, v2), to= processes)                     # broadcast(B,i,flag,v)
+        if await(len(setof(p, received(('B-response', _i, Bi), from_= p))) >= f+1):  # wait until receive (B-response,i,B[i]) from f+1 proc
+            S = setof(x, received(('B-response', _i, Bi)), x in Bi) # S <- union of all B[i]s received
+            if len(S) == 1 and some((True, val) in S):              # if S contains only <true,val> for some val then ## but can it have <false,val2> or/and <true,val2>
+                return ('commit', val)                              #   return <commit,val>
+            elif some((True, val) in S):                            # else if S contains some entry <true,val> then  ## unique because one majority
+                return ('adopt', val)                               #   return <adopt,val>
+            else:                                                   # else
+                return ('adopt', max(S))                            #   return <adopt,max(S)>
+        elif timeout(20):
+            output ('request timed out in BStep')
+
+    def receive(msg=('R', j, v), from_= p):          # upon reception of (R,j,v) from p  # wrong/confusing R without tagging/quoting
+        R.add((j,v))                                 # Add <j,v> to R
+        send(('R-response', j, R), to= p)            # send(R-response,j,R) to p
+
+    def receive(msg=('A', j, v), from_=p):           # upon reception of (A,j,v) from p
+        A[j].add(v)                                  # Add v to A[j]
+        send(('A-response', j, A[j]), to=p)          # send (A-response,j,A[j]) to p  ## A[i] with i < j are dead?
+
+    def receive(msg=('B', j, flag, v), from_= p):    # upon reception of (B,j,flag,v) from p:
+        B[j].add((flag,v))                           # Add <flag,v> to B[j]
+        send(('B-response', j, B[j]), to= p)         # send (B-response,j,B[j]) to p  ## B[i] with i < j are dead?
+
+    def run():
+        if (pId == 1):
+            val = propose(2)
+        else:
+            val = propose(1)
+        output("Value is", val)
+        send(('learned', val), to=parent())
+
+def main():
+    n = int(sys.argv[1]) if len(sys.argv) > 1 else 9
+    ps = new(P, num= n)
+    for i, p in enumerate(ps):
+        setup(p, (i, ps))
+    start(ps)
+
+    f = int((n - 1)/2)
+    n_fProcesses = random.randint(0, f)
+    for p in random.sample(ps, n_fProcesses):
+        end (p)
+        output ('process ', p, ' killed')
+
+    output ('no of faulty processes ', n_fProcesses)
+
+    if await (len(setof(p, received(('learned', _), from_= p))) >= f+1):
+            S = setof(v, received(('learned', v)))
+            if len(S) == 1 and some(val in S):
+                output('successfully reached consensus, learned value ', val)
+            else:
+                output('safety violate, learned multiple values:', S)
+    elif timeout(20):
+            output ('timed out, consensus not yet reached')
